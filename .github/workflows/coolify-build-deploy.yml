@@ -40,6 +40,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64
           push: true
           build-args: NPM_TOKEN=${{ secrets.GH_TOKEN }}
           secrets: npm_token=${{ secrets.GH_TOKEN }}
