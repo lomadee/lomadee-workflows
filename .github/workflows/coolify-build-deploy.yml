@@ -33,7 +33,7 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: registry.digitalocean.com
-          username: ${{ secrets.DOCR_TOKEN }}
+          username: ${{ secrets.DOCR_USERNAME }}
           password: ${{ secrets.DOCR_TOKEN }}
 
       - name: Build and push
