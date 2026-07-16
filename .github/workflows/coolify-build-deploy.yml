@@ -16,6 +16,10 @@ on:
         required: false
         type: string
         default: default
+      dockerfile:
+        required: false
+        type: string
+        default: Dockerfile
 
 concurrency:
   group: coolify-deploy-${{ inputs.app_name }}-${{ github.ref }}
@@ -45,6 +49,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ inputs.dockerfile }}
           platforms: linux/amd64
           push: true
           build-args: NPM_TOKEN=${{ secrets.GH_TOKEN }}
@@ -60,6 +65,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ inputs.dockerfile }}
           platforms: linux/amd64
           push: true
           build-args: |
