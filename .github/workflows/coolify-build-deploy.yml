@@ -20,6 +20,10 @@ on:
         required: false
         type: string
         default: Dockerfile
+      extra_build_args:
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   group: coolify-deploy-${{ inputs.app_name }}-${{ github.ref }}
@@ -52,7 +56,9 @@ jobs:
           file: ${{ inputs.dockerfile }}
           platforms: linux/amd64
           push: true
-          build-args: NPM_TOKEN=${{ secrets.GH_TOKEN }}
+          build-args: |
+            NPM_TOKEN=${{ secrets.GH_TOKEN }}
+            ${{ inputs.extra_build_args }}
           secrets: npm_token=${{ secrets.GH_TOKEN }}
           tags: |
             registry.digitalocean.com/lomadee/${{ inputs.app_name }}:latest
@@ -86,6 +92,7 @@ jobs:
             JWT_SECRET=${{ secrets.JWT_SECRET }}
             AMQP_URL=${{ secrets.AMQP_URL }}
             AMQP_COMMISSION_URL=${{ secrets.AMQP_COMMISSION_URL }}
+            ${{ inputs.extra_build_args }}
           secrets: npm_token=${{ secrets.GH_TOKEN }}
           tags: |
             registry.digitalocean.com/lomadee/${{ inputs.app_name }}:latest
