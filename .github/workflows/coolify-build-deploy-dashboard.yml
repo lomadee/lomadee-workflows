@@ -94,6 +94,7 @@ jobs:
             NEXT_PUBLIC_MIXPANEL_TOKEN=${{ secrets.NEXT_PUBLIC_MIXPANEL_TOKEN }}
             NEXT_PUBLIC_META_PIXEL_ID=${{ secrets.NEXT_PUBLIC_META_PIXEL_ID }}
             NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=${{ secrets.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY }}
+            GIT_SHA=${{ github.sha }}
           secrets: npm_token=${{ secrets.GH_TOKEN }}
           tags: |
             registry.digitalocean.com/lomadee/${{ inputs.app_name }}:latest
