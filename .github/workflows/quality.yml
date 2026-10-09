@@ -1,0 +1,384 @@
+name: Quality
+
+# Gate de pull request para repositórios Node/TypeScript.
+# Somente lint (sem --fix) e typecheck. Sem teste unitário, sem smoke test,
+# sem matriz, sem build de imagem e sem deploy.
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: Versão do Node usada no lint e no typecheck. Use a mesma versão do Dockerfile do serviço.
+        required: false
+        type: string
+        default: "22"
+      working_directory:
+        description: Diretório do pacote, relativo à raiz, onde estão o package.json e o lockfile.
+        required: false
+        type: string
+        default: "."
+      max_warnings:
+        description: Teto de warnings do ESLint. -1 (padrão) não impõe teto. Informe a contagem atual; o número só pode cair.
+        required: false
+        type: number
+        default: -1
+    secrets:
+      npm_token:
+        description: Token de leitura do GitHub Packages para o escopo @lomadee. Opcional quando o repositório não instala pacote privado.
+        required: false
+
+concurrency:
+  group: quality-${{ github.repository }}-${{ github.ref }}-${{ inputs.working_directory }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint and typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Detect package manager
+        id: detect
+        working-directory: ${{ github.workspace }}
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory }}
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+
+          const root = process.env.GITHUB_WORKSPACE;
+          const raw = process.env.WORKING_DIRECTORY || '.';
+
+          if (
+            raw.includes('\0') ||
+            !/^[A-Za-z0-9._@/-]+$/.test(raw) ||
+            raw.split('/').includes('..')
+          ) {
+            console.error(`::error::working_directory inválido: ${raw}`);
+            process.exit(1);
+          }
+
+          const dir = path.resolve(root, raw);
+          const rel = path.relative(root, dir);
+          if (rel.startsWith('..') || path.isAbsolute(rel)) {
+            console.error('::error::working_directory precisa ficar dentro do repositório.');
+            process.exit(1);
+          }
+          if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
+            console.error(`::error::Diretório não encontrado: ${raw}`);
+            process.exit(1);
+          }
+
+          const pkgPath = path.join(dir, 'package.json');
+          if (!fs.existsSync(pkgPath)) {
+            console.error(`::error::package.json não encontrado em ${raw}`);
+            process.exit(1);
+          }
+
+          let pkg;
+          try {
+            pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+          } catch {
+            console.error(`::error::package.json inválido em ${raw}`);
+            process.exit(1);
+          }
+
+          const lockCandidates = [
+            ['pnpm', 'pnpm-lock.yaml'],
+            ['yarn', 'yarn.lock'],
+            ['npm', 'package-lock.json'],
+          ].filter(([, file]) => fs.existsSync(path.join(dir, file)));
+
+          if (lockCandidates.length === 0) {
+            console.error(
+              `::error::Nenhum lockfile (pnpm-lock.yaml, yarn.lock ou package-lock.json) em ${raw}`,
+            );
+            process.exit(1);
+          }
+
+          let packageManager = '';
+          if (typeof pkg.packageManager === 'string' && pkg.packageManager !== '') {
+            if (!/^(yarn|pnpm|npm)@\d+\.\d+\.\d+(?:\+[A-Za-z0-9._-]+)?$/.test(pkg.packageManager)) {
+              console.error(`::error::packageManager inválido: ${pkg.packageManager}`);
+              process.exit(1);
+            }
+            packageManager = pkg.packageManager.split('+')[0];
+          }
+
+          let manager;
+          if (lockCandidates.length === 1) {
+            manager = lockCandidates[0][0];
+            if (packageManager && !packageManager.startsWith(`${manager}@`)) {
+              console.error(
+                `::error::packageManager (${packageManager}) não corresponde ao lockfile ${lockCandidates[0][1]}`,
+              );
+              process.exit(1);
+            }
+          } else {
+            const fromField = packageManager.split('@')[0];
+            const chosen = lockCandidates.find(([name]) => name === fromField);
+            if (!chosen) {
+              const names = lockCandidates.map(([, file]) => file).join(', ');
+              console.error(
+                `::error::Há mais de um lockfile (${names}) e packageManager não desempata.`,
+              );
+              process.exit(1);
+            }
+            manager = chosen[0];
+            console.log(`::warning::Mais de um lockfile; usando ${manager} por causa de packageManager.`);
+          }
+
+          const toPosix = (value) => value.split(path.sep).join('/');
+          const lockFile = lockCandidates.find(([name]) => name === manager)[1];
+          const prefix = rel === '' ? '' : `${toPosix(rel)}/`;
+
+          let yarnMode = '';
+          if (manager === 'yarn') {
+            const major = packageManager.startsWith('yarn@')
+              ? Number(packageManager.slice('yarn@'.length).split('.')[0])
+              : null;
+            const berry = fs.existsSync(path.join(dir, '.yarnrc.yml')) || (major !== null && major >= 2);
+            yarnMode = berry ? 'berry' : 'classic';
+          }
+
+          let pmVersion = '';
+          if (manager === 'pnpm') {
+            if (packageManager.startsWith('pnpm@')) {
+              pmVersion = packageManager.slice('pnpm@'.length);
+            } else {
+              const text = fs.readFileSync(path.join(dir, 'pnpm-lock.yaml'), 'utf8');
+              const found = text.match(/lockfileVersion:\s*['"]?(\d+)/);
+              const major = found ? Number(found[1]) : 9;
+              if (major <= 5) pmVersion = '7';
+              else if (major === 6) pmVersion = '8';
+              else pmVersion = '9';
+            }
+          }
+
+          const output = [
+            `manager=${manager}`,
+            `lockfile=${prefix}${lockFile}`,
+            `package_json=${prefix}package.json`,
+            `package_manager=${packageManager}`,
+            `yarn_mode=${yarnMode}`,
+            `pm_version=${pmVersion}`,
+          ].join('\n');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `${output}\n`);
+          console.log(output);
+          NODE
+
+      - name: Setup pnpm
+        if: ${{ steps.detect.outputs.manager == 'pnpm' }}
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ steps.detect.outputs.pm_version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: ${{ steps.detect.outputs.manager }}
+          cache-dependency-path: ${{ steps.detect.outputs.lockfile }}
+
+      - name: Activate Yarn
+        if: ${{ steps.detect.outputs.manager == 'yarn' }}
+        env:
+          PACKAGE_MANAGER: ${{ steps.detect.outputs.package_manager }}
+          YARN_MODE: ${{ steps.detect.outputs.yarn_mode }}
+        run: |
+          set -euo pipefail
+          export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+
+          if [ -n "${PACKAGE_MANAGER}" ]; then
+            if corepack enable && corepack prepare "${PACKAGE_MANAGER}" --activate; then
+              yarn --version
+              exit 0
+            fi
+            echo "corepack não ativou ${PACKAGE_MANAGER}."
+          fi
+
+          if [ "${YARN_MODE}" = "classic" ]; then
+            npm install --global yarn@1.22.22
+            yarn --version
+            exit 0
+          fi
+
+          echo "::error::Não foi possível ativar o Yarn. Yarn Berry exige packageManager válido e corepack funcionando."
+          exit 1
+
+      - name: Install dependencies
+        id: install
+        env:
+          PM: ${{ steps.detect.outputs.manager }}
+          YARN_MODE: ${{ steps.detect.outputs.yarn_mode }}
+          NPM_TOKEN: ${{ secrets.npm_token }}
+          NODE_AUTH_TOKEN: ${{ secrets.npm_token }}
+          YARN_NPM_AUTH_TOKEN: ${{ secrets.npm_token }}
+          HUSKY: "0"
+        run: |
+          set -euo pipefail
+
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            (
+              umask 077
+              {
+                printf '%s\n' "@lomadee:registry=https://npm.pkg.github.com"
+                printf '%s\n' "//npm.pkg.github.com/:_authToken=${NPM_TOKEN}"
+              } >> "${HOME}/.npmrc"
+            )
+          else
+            echo "npm_token não informado. Seguindo sem autenticação no GitHub Packages."
+          fi
+
+          case "${PM}" in
+            npm)
+              npm ci
+              ;;
+            pnpm)
+              pnpm install --frozen-lockfile
+              ;;
+            yarn)
+              if [ "${YARN_MODE}" = "berry" ]; then
+                yarn install --immutable
+              else
+                yarn install --frozen-lockfile --non-interactive
+              fi
+              ;;
+            *)
+              echo "::error::Gerenciador de pacotes desconhecido: ${PM}"
+              exit 1
+              ;;
+          esac
+
+      - name: Lint
+        env:
+          MAX_WARNINGS: ${{ inputs.max_warnings }}
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const { spawnSync } = require('child_process');
+
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const lint = pkg.scripts && pkg.scripts.lint;
+          if (typeof lint !== 'string' || lint.trim() === '') {
+            console.error('::error::package.json não tem o script "lint". O CI não instala o ESLint por conta própria.');
+            process.exit(1);
+          }
+
+          const maxRaw = String(process.env.MAX_WARNINGS ?? '').trim();
+          if (!/^-?\d+$/.test(maxRaw)) {
+            console.error(`::error::max_warnings precisa ser um inteiro. Recebido: ${maxRaw}`);
+            process.exit(1);
+          }
+          const maxWarnings = Number(maxRaw);
+          if (maxWarnings < -1) {
+            console.error('::error::max_warnings mínimo é -1 (sem teto).');
+            process.exit(1);
+          }
+
+          let cmd = lint
+            .replace(/(^|\s)--fix(?:=true)?(?=\s|$)/g, '$1')
+            .replace(/[ \t]{2,}/g, ' ')
+            .trim();
+
+          if (cmd === '') {
+            console.error('::error::O script lint ficou vazio depois de remover --fix.');
+            process.exit(1);
+          }
+
+          if (maxWarnings >= 0) {
+            const hasEslint = /(^|\s)eslint(?=\s|$)/.test(cmd);
+            const hasNextLint = /(^|\s)next\s+lint(?=\s|$)/.test(cmd);
+            if (hasEslint === hasNextLint) {
+              console.error('::error::max_warnings exige um comando eslint ou next lint identificável no script lint.');
+              process.exit(1);
+            }
+            cmd = cmd
+              .replace(/(^|\s)--max-warnings(?:=|\s+)\d+/g, '$1')
+              .replace(/[ \t]{2,}/g, ' ')
+              .trim();
+            if (hasEslint) {
+              cmd = cmd.replace(/(^|\s)eslint(?=\s|$)/g, `$1eslint --max-warnings=${maxWarnings}`);
+            } else {
+              cmd = cmd.replace(/(^|\s)next(\s+)lint(?=\s|$)/g, `$1next$2lint --max-warnings=${maxWarnings}`);
+            }
+          }
+
+          if (/(^|\s)--(?:fix|write)(?:=|\s|$)/.test(cmd)) {
+            console.error('::error::O script lint ainda altera arquivo (--fix ou --write). O CI só aceita verificação.');
+            process.exit(1);
+          }
+
+          console.log(`Lint sem --fix: ${cmd}`);
+          const result = spawnSync(cmd, {
+            shell: '/bin/bash',
+            stdio: 'inherit',
+            env: {
+              ...process.env,
+              PATH: `${process.cwd()}/node_modules/.bin:${process.env.PATH}`,
+            },
+          });
+          if (result.status === null) {
+            console.error('::error::O lint não terminou normalmente.');
+            process.exit(1);
+          }
+          process.exit(result.status);
+          NODE
+
+      - name: Typecheck
+        if: ${{ always() && steps.install.outcome == 'success' }}
+        env:
+          PM: ${{ steps.detect.outputs.manager }}
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const { spawnSync } = require('child_process');
+
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const typecheck = pkg.scripts && pkg.scripts.typecheck;
+          const pm = process.env.PM;
+          let cmd;
+
+          if (typeof typecheck === 'string' && typecheck.trim() !== '') {
+            if (pm === 'npm') cmd = 'npm run typecheck';
+            else if (pm === 'yarn') cmd = 'yarn typecheck';
+            else if (pm === 'pnpm') cmd = 'pnpm run typecheck';
+            else {
+              console.error(`::error::Gerenciador de pacotes desconhecido: ${pm}`);
+              process.exit(1);
+            }
+            console.log(`Typecheck via script: ${typecheck}`);
+          } else if (pm === 'yarn') {
+            // yarn tsc encontra o binário no Yarn 1 e no Berry (PnP ou node-modules).
+            cmd = 'yarn tsc --noEmit';
+            console.log('Typecheck via yarn tsc --noEmit (não há script typecheck).');
+          } else if ((pm === 'npm' || pm === 'pnpm') && fs.existsSync('node_modules/.bin/tsc')) {
+            cmd = pm === 'pnpm' ? 'pnpm exec tsc --noEmit' : 'tsc --noEmit';
+            console.log(`Typecheck via ${cmd} (não há script typecheck).`);
+          } else {
+            console.error('::error::Não há script "typecheck" nem o binário tsc instalado.');
+            process.exit(1);
+          }
+
+          const result = spawnSync(cmd, {
+            shell: '/bin/bash',
+            stdio: 'inherit',
+            env: {
+              ...process.env,
+              PATH: `${process.cwd()}/node_modules/.bin:${process.env.PATH}`,
+            },
+          });
+          if (result.status === null) {
+            console.error('::error::O typecheck não terminou normalmente.');
+            process.exit(1);
+          }
+          process.exit(result.status);
+          NODE
