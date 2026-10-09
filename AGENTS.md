@@ -35,6 +35,7 @@ Regras derivadas:
 3. Todo PR de serviço é revertível sozinho: um deploy, um PR, um rollback limpo. Mudança que dependa de migração de banco no mesmo deploy não entra.
 4. Todo PR de serviço diz qual sinal do New Relic mostra sucesso ou falha, e qual sha volta em caso de rollback.
 5. Subir `max_warnings` para o CI ficar verde é proibido. O teto só desce (regra WF-CI-02).
+6. O gate da organização (`.github/workflows/org-quality.yml`, regra WF-CI-03) é o mesmo escopo: lint e typecheck. Repositório sem esses scripts não é bloqueado. Repositório que já chama `quality.yml` não roda o gate duas vezes.
 
 ## 2. Regras de negócio sempre explícitas
 
@@ -64,6 +65,7 @@ Regra de negócio nunca fica implícita num `if` solto, número mágico ou comen
 |---|---|---|
 | WF-CI-01 | O workflow reutilizável `quality.yml` executa somente lint sem `--fix` e typecheck. Não executa teste unitário nem smoke test. | Confirmado |
 | WF-CI-02 | `max_warnings` trava a contagem atual de warnings. O valor só pode cair. Aumentar o teto para destravar o CI é proibido. | Confirmado |
+| WF-CI-03 | O workflow de ruleset `org-quality.yml` executa somente lint sem `--fix` e/ou o script `typecheck`, e só o script que o repositório já tem. Não executa teste unitário, smoke test nem o fallback `tsc --noEmit`. O job passa sem rodar o gate quando não há `package.json`, quando não há script `lint` nem `typecheck`, ou quando o repositório já chama `quality.yml`. | Confirmado |
 | WF-REL-01 | Deploy publica `registry.digitalocean.com/lomadee/<app>:latest` e `:<sha>`. Rollback é o redeploy do sha anterior. | Confirmado (tags conferidas nos dois workflows de deploy; o job que dispara o rollback não está neste repositório) |
 
 ## 3. DRY e SOLID
@@ -328,11 +330,33 @@ Contrato:
 | Lockfile | `yarn.lock`, `pnpm-lock.yaml` ou `package-lock.json`, no `working_directory`. Mais de um lockfile só segue se `packageManager` desempata. |
 | Install | Congelado: `npm ci`, `yarn install --frozen-lockfile` (Yarn 1) ou `yarn install --immutable` (Berry: `.yarnrc.yml` ou `packageManager` 2+), `pnpm install --frozen-lockfile`. |
 | Node | `actions/setup-node` com cache do lockfile. A versão é o input. Não herda o input `node_version` de `coolify-build-deploy.yml`: esse input existe e **não é lido** pelo build. A imagem usa o Node do Dockerfile. |
-| Lint | Script `lint` com `--fix` removido. `--write` restante falha o job. Se `max_warnings` ≥ 0, o teto é inserido em cada `eslint` ou `next lint` e substitui um `--max-warnings` já presente. Os dois no mesmo script, ou nenhum dos dois, falham quando o teto é pedido. |
+| Lint | Script `lint` com `--fix` removido. `--write` restante falha o job. Se `max_warnings` ≥ 0, o teto é inserido em cada `eslint` ou `next lint` e substitui um `--max-warnings` já presente. Os dois no mesmo script, ou nenhum dos dois, falham quando o teto é pedido. A função está em `.github/actions/quality-gate` e é a mesma do `org-quality.yml`. |
 | Typecheck | Script `typecheck` se existir. Sem o script: `yarn tsc --noEmit`, `pnpm exec tsc --noEmit` ou `tsc --noEmit`, conforme o lockfile. |
 | Custo | Um job, sem matriz. Concurrency `quality-<repo>-<ref>-<diretório>` cancela a rodada superada. `timeout-minutes: 10`. |
 | Fora do job | Teste unitário, smoke test, build de imagem, deploy, marcador de change tracking no New Relic. |
 
 Os workflows `coolify-build-deploy.yml` e `coolify-build-deploy-dashboard.yml` não chamam este gate. Ligá-los é outro PR.
 
-Pré-requisito de acesso: em Actions do `lomadee-workflows`, o workflow reutilizável precisa estar acessível aos repositórios da organização. Isso é configuração do GitHub, não deste arquivo.
+Pré-requisito de acesso: em Actions do `lomadee-workflows`, o workflow reutilizável e a action `quality-gate` precisam estar acessíveis aos repositórios da organização. Isso é configuração do GitHub, não deste arquivo.
+
+## 11. CI da organização: `org-quality.yml`
+
+Arquivo: `.github/workflows/org-quality.yml`. Disparo: `pull_request` e `merge_group`, para a regra de ruleset **Require workflows to pass before merging**. Não é `workflow_call` e não aceita inputs. O `quality.yml` e o check `quality / Lint and typecheck` não mudam de nome.
+
+| Peça | Comportamento |
+|---|---|
+| Check | `Org quality / Org lint and typecheck` (nome do workflow / nome do job). O ruleset aponta o arquivo, não essa string. |
+| Arquivo no ruleset | Repositório `lomadee/lomadee-workflows`, branch `main`, caminho `.github/workflows/org-quality.yml`. |
+| Permissões | `contents: read` e `packages: read`. Sem cache de dependência (`actions: write` ficaria de fora). |
+| Configuração | Opcional, na raiz do repositório alvo: `.github/quality.json` com `working_directory` (padrão `"."`) e `max_warnings` (padrão `-1`, inteiro JSON ≥ -1). Chave desconhecida ou JSON inválido falha o job. |
+| Node | `.nvmrc` e depois `.node-version` no `working_directory`, os mesmos arquivos na raiz, o primeiro número de `engines.node`, senão `22`. Arquivo de pin inválido falha o job. |
+| Lockfile | Igual ao `quality.yml`. Sem lockfile, com script `lint` ou `typecheck`, o job falha. |
+| Lint | O mesmo comando do `quality.yml` (tira `--fix`, recusa `--write`, aplica `max_warnings`). |
+| Typecheck | Só se existir script `typecheck`. Não há fallback `tsc --noEmit`. |
+| Um script só | Roda esse script e não inventa o outro. |
+| Skip com sucesso | Sem `package.json` no diretório; ou sem script `lint` e sem script `typecheck`; ou qualquer arquivo `.github/workflows/*.{yml,yaml}` contém `lomadee/lomadee-workflows/.github/workflows/quality.yml`. O job fica verde e grava notice e summary. |
+| Skip do fonte | O job não roda quando `github.repository` é `lomadee/lomadee-workflows`. Não coloque este repositório no ruleset. |
+| Segredo | Ver o README. O token não é impresso. `secrets` deste repositório não atravessam o ruleset. |
+| Fora do job | Teste unitário, smoke test, build, deploy. Sem `cancel-in-progress`. |
+
+Um `working_directory` por repositório. Monorepo que já chama `quality.yml` sai pelo skip do arquivo inteiro, inclusive pacotes que o workflow reutilizável não cobre. WF-CI-02 continua valendo para o número gravado em `.github/quality.json`.
