@@ -182,7 +182,10 @@ PR que altere qualquer item abaixo não é elegível a auto-merge e deve ser mar
 ## 8. Regras de PR
 
 1. **Uma preocupação só.** Um bug, uma regra ou um refactor. Meta: ≤ 200 linhas alteradas e ≤ 5 arquivos. Refactor oportunista é outro PR.
-2. Título: `<tipo>(<módulo>): <resumo>`. Tipos: `fix`, `feat`, `refactor`, `chore`, `perf`, `obs`.
+2. Commits e texto do PR são em inglês em todo repositório Lomadee (decisão de Hugo):
+   - Mensagem de commit: Conventional Commits em inglês, `<type>(<scope>): <summary>`.
+   - Título e corpo do PR: inglês.
+   - Tipos: `fix`, `feat`, `refactor`, `chore`, `perf`, `obs`.
 3. Descrição obrigatória:
    - **Problema** (issue do New Relic ou do bot de SRE, com `trace.id` se houver);
    - **Regra de negócio**: ID (ex.: `OA-SHORT-03`) e status (Confirmado, Inferido, TODO), ou "nenhuma" se for só técnico;
