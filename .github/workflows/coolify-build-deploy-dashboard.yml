@@ -47,8 +47,9 @@ jobs:
           file: ${{ inputs.dockerfile }}
           platforms: linux/amd64
           push: true
+          # NPM_TOKEN não é build-arg: o token vai no secret `npm_token`.
+          # As NEXT_PUBLIC_* continuam porque o Next inlineia no bundle.
           build-args: |
-            NPM_TOKEN=${{ secrets.GH_TOKEN }}
             NEXT_PUBLIC_APP_URL=${{ secrets.NEXT_PUBLIC_APP_URL }}
             NEXT_PUBLIC_MAIN_API_URL=${{ secrets.NEXT_PUBLIC_MAIN_API_URL }}
             NEXT_PUBLIC_FINANCE_API_OLD_URL=${{ secrets.NEXT_PUBLIC_FINANCE_API_OLD_URL }}
