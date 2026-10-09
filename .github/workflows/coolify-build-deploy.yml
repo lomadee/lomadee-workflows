@@ -21,6 +21,7 @@ on:
         type: string
         default: Dockerfile
       extra_build_args:
+        description: "Build-args públicos extras (KEY=VALUE por linha). Não usar para segredos."
         required: false
         type: string
         default: ""
@@ -56,8 +57,9 @@ jobs:
           file: ${{ inputs.dockerfile }}
           platforms: linux/amd64
           push: true
+          # extra_build_args é só valor público. O token de npm vai no secret
+          # BuildKit `npm_token` e não entra na layer.
           build-args: |
-            NPM_TOKEN=${{ secrets.GH_TOKEN }}
             ${{ inputs.extra_build_args }}
           secrets: npm_token=${{ secrets.GH_TOKEN }}
           tags: |
@@ -74,13 +76,20 @@ jobs:
           file: ${{ inputs.dockerfile }}
           platforms: linux/amd64
           push: true
+          # NEXT_PUBLIC_* precisam estar no build: o Next grava o valor no bundle
+          # e a env de runtime do Coolify não substitui. Segredo de servidor não
+          # é build-arg. Fica como secret mount (id = nome da env) para o
+          # Dockerfile usar com --mount=type=secret se o build precisar; o
+          # valor não persiste na imagem. Em runtime o Coolify injeta a env.
           build-args: |
-            NPM_TOKEN=${{ secrets.GH_TOKEN }}
             NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
             NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
             NEXT_PUBLIC_APP_URL=${{ secrets.NEXT_PUBLIC_APP_URL }}
             NEXT_PUBLIC_PROXY_URL=${{ secrets.NEXT_PUBLIC_PROXY_URL }}
             NEXT_PUBLIC_AUTH_URL=${{ secrets.NEXT_PUBLIC_AUTH_URL }}
+            ${{ inputs.extra_build_args }}
+          secrets: |
+            npm_token=${{ secrets.GH_TOKEN }}
             SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
             DB_HOST=${{ secrets.DB_HOST }}
             DB_USER=${{ secrets.DB_USER }}
@@ -93,8 +102,6 @@ jobs:
             JWT_SECRET=${{ secrets.JWT_SECRET }}
             AMQP_URL=${{ secrets.AMQP_URL }}
             AMQP_COMMISSION_URL=${{ secrets.AMQP_COMMISSION_URL }}
-            ${{ inputs.extra_build_args }}
-          secrets: npm_token=${{ secrets.GH_TOKEN }}
           tags: |
             registry.digitalocean.com/lomadee/${{ inputs.app_name }}:latest
             registry.digitalocean.com/lomadee/${{ inputs.app_name }}:${{ github.sha }}
