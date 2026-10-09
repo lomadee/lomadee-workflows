@@ -1,0 +1,77 @@
+name: Quality gate
+description: >-
+  Detecta o gerenciador de pacotes, planeja o gate da organização ou executa
+  lint e typecheck. Compartilhado por quality.yml e org-quality.yml.
+
+inputs:
+  mode:
+    description: detect, plan, lint ou typecheck.
+    required: true
+  working_directory:
+    description: Diretório do pacote, relativo à raiz do repositório.
+    required: false
+    default: "."
+  max_warnings:
+    description: Teto de warnings do ESLint. -1 não impõe teto.
+    required: false
+    default: "-1"
+  package_manager:
+    description: npm, yarn ou pnpm. Obrigatório no modo typecheck.
+    required: false
+    default: ""
+
+outputs:
+  manager:
+    description: npm, yarn ou pnpm.
+    value: ${{ steps.run.outputs.manager }}
+  lockfile:
+    description: Caminho do lockfile relativo à raiz.
+    value: ${{ steps.run.outputs.lockfile }}
+  package_json:
+    description: Caminho do package.json relativo à raiz.
+    value: ${{ steps.run.outputs.package_json }}
+  package_manager:
+    description: Campo packageManager, sem o hash do corepack.
+    value: ${{ steps.run.outputs.package_manager }}
+  yarn_mode:
+    description: classic, berry ou vazio.
+    value: ${{ steps.run.outputs.yarn_mode }}
+  pm_version:
+    description: Versão do pnpm, quando o gerenciador é pnpm.
+    value: ${{ steps.run.outputs.pm_version }}
+  skip:
+    description: true quando o gate da organização não deve instalar nem rodar.
+    value: ${{ steps.run.outputs.skip }}
+  skip_reason:
+    description: reusable_quality, no_package_json ou no_lint_or_typecheck_script.
+    value: ${{ steps.run.outputs.skip_reason }}
+  node_version:
+    description: Versão do Node para o setup-node.
+    value: ${{ steps.run.outputs.node_version }}
+  node_version_source:
+    description: Arquivo ou campo que definiu a versão.
+    value: ${{ steps.run.outputs.node_version_source }}
+  working_directory:
+    description: Diretório efetivo do pacote.
+    value: ${{ steps.run.outputs.working_directory }}
+  max_warnings:
+    description: Teto lido de .github/quality.json, ou -1.
+    value: ${{ steps.run.outputs.max_warnings }}
+  run_lint:
+    description: true quando o script lint existe.
+    value: ${{ steps.run.outputs.run_lint }}
+  run_typecheck:
+    description: true quando o script typecheck existe.
+    value: ${{ steps.run.outputs.run_typecheck }}
+
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        WORKING_DIRECTORY: ${{ inputs.working_directory }}
+        MAX_WARNINGS: ${{ inputs.max_warnings }}
+        PM: ${{ inputs.package_manager }}
+      run: node "$GITHUB_ACTION_PATH/main.js"

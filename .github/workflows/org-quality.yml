@@ -1,0 +1,188 @@
+name: Org quality
+
+# Gate de lint e typecheck exigível por um ruleset da organização
+# ("Require workflows to pass before merging"), sem PR em cada repositório.
+#
+# Não é workflow_call. Não recebe inputs nem secrets do caller.
+# Não substitui quality.yml e não usa o nome de job "Lint and typecheck".
+#
+# Check que aparece no pull request:
+#   Org quality / Org lint and typecheck
+#
+# Arquivo que o ruleset aponta:
+#   repositório lomadee/lomadee-workflows, branch main,
+#   caminho .github/workflows/org-quality.yml
+#
+# O GitHub dispara este arquivo no repositório alvo (pull_request e
+# merge_group). Filtros de branch, path e type são ignorados pelo ruleset.
+# Sem concurrency cancel-in-progress: o GitHub pede isso para ruleset
+# workflow, porque um run cancelado não satisfaz o gate.
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  org-quality:
+    name: Org lint and typecheck
+    # No repositório fonte o pull_request usaria o arquivo do PR. O ruleset,
+    # nos outros repositórios, usa a cópia pinada em main. Não inclua
+    # lomadee-workflows no ruleset. Depois do merge, desabilite este workflow
+    # em Actions deste repositório; o ruleset continua disparando a cópia de main.
+    if: github.repository != 'lomadee/lomadee-workflows'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Plan
+        id: plan
+        uses: lomadee/lomadee-workflows/.github/actions/quality-gate@main
+        with:
+          mode: plan
+
+      - name: Setup pnpm
+        if: steps.plan.outcome == 'success' && steps.plan.outputs.skip != 'true' && steps.plan.outputs.manager == 'pnpm'
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ steps.plan.outputs.pm_version }}
+
+      - name: Setup Node
+        if: steps.plan.outcome == 'success' && steps.plan.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.plan.outputs.node_version }}
+
+      - name: Activate Yarn
+        if: steps.plan.outcome == 'success' && steps.plan.outputs.skip != 'true' && steps.plan.outputs.manager == 'yarn'
+        working-directory: ${{ steps.plan.outputs.working_directory }}
+        env:
+          PACKAGE_MANAGER: ${{ steps.plan.outputs.package_manager }}
+          YARN_MODE: ${{ steps.plan.outputs.yarn_mode }}
+        run: |
+          set -euo pipefail
+          export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+
+          if [ -n "${PACKAGE_MANAGER}" ]; then
+            if corepack enable && corepack prepare "${PACKAGE_MANAGER}" --activate; then
+              yarn --version
+              exit 0
+            fi
+            echo "corepack não ativou ${PACKAGE_MANAGER}."
+          fi
+
+          if [ "${YARN_MODE}" = "classic" ]; then
+            npm install --global yarn@1.22.22
+            yarn --version
+            exit 0
+          fi
+
+          echo "::error::Não foi possível ativar o Yarn. Yarn Berry exige packageManager válido e corepack funcionando."
+          exit 1
+
+      - name: Install dependencies
+        id: install
+        if: steps.plan.outcome == 'success' && steps.plan.outputs.skip != 'true'
+        working-directory: ${{ steps.plan.outputs.working_directory }}
+        env:
+          PM: ${{ steps.plan.outputs.manager }}
+          YARN_MODE: ${{ steps.plan.outputs.yarn_mode }}
+          # Segredo do repositório alvo ou segredo de organização com o mesmo nome.
+          # Vazio se não existir. Nunca imprimir o valor.
+          GH_TOKEN_SECRET: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN_VALUE: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          auth_source="sem token de GitHub Packages"
+          token=""
+          if [ -n "${GH_TOKEN_SECRET:-}" ]; then
+            token="${GH_TOKEN_SECRET}"
+            auth_source="segredo GH_TOKEN do repositório alvo ou da organização"
+          elif [ -n "${GITHUB_TOKEN_VALUE:-}" ]; then
+            token="${GITHUB_TOKEN_VALUE}"
+            auth_source="GITHUB_TOKEN com permissão packages:read"
+          fi
+
+          NPMRC_BACKUP=""
+          created=0
+          if [ ! -f "${HOME}/.npmrc" ]; then
+            created=1
+          fi
+          cleanup() {
+            if [ -n "${NPMRC_BACKUP}" ] && [ -f "${NPMRC_BACKUP}" ]; then
+              mv "${NPMRC_BACKUP}" "${HOME}/.npmrc"
+            elif [ "${created}" = "1" ]; then
+              rm -f "${HOME}/.npmrc"
+            fi
+          }
+          trap cleanup EXIT
+
+          if [ -f "${HOME}/.npmrc" ]; then
+            tmp="$(mktemp)"
+            cp "${HOME}/.npmrc" "${tmp}"
+            NPMRC_BACKUP="${tmp}"
+          fi
+
+          if [ -n "${token}" ]; then
+            (
+              umask 077
+              {
+                printf '%s\n' "@lomadee:registry=https://npm.pkg.github.com"
+                printf '%s\n' "//npm.pkg.github.com/:_authToken=${token}"
+              } >> "${HOME}/.npmrc"
+            )
+            chmod 600 "${HOME}/.npmrc"
+            export NODE_AUTH_TOKEN="${token}"
+            export YARN_NPM_AUTH_TOKEN="${token}"
+          fi
+          export HUSKY=0
+
+          echo "Autenticação do GitHub Packages: ${auth_source}."
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            printf '\nAutenticação do GitHub Packages: %s.\n' "${auth_source}" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+          case "${PM}" in
+            npm)
+              npm ci
+              ;;
+            pnpm)
+              pnpm install --frozen-lockfile
+              ;;
+            yarn)
+              if [ "${YARN_MODE}" = "berry" ]; then
+                yarn install --immutable
+              else
+                yarn install --frozen-lockfile --non-interactive
+              fi
+              ;;
+            *)
+              echo "::error::Gerenciador de pacotes desconhecido: ${PM}"
+              exit 1
+              ;;
+          esac
+
+      - name: Lint
+        if: steps.plan.outcome == 'success' && steps.plan.outputs.skip != 'true' && steps.plan.outputs.run_lint == 'true'
+        uses: lomadee/lomadee-workflows/.github/actions/quality-gate@main
+        with:
+          mode: lint
+          working_directory: ${{ steps.plan.outputs.working_directory }}
+          max_warnings: ${{ steps.plan.outputs.max_warnings }}
+
+      - name: Typecheck
+        if: steps.plan.outcome == 'success' && steps.plan.outputs.skip != 'true' && steps.plan.outputs.run_typecheck == 'true' && steps.install.outcome == 'success'
+        uses: lomadee/lomadee-workflows/.github/actions/quality-gate@main
+        with:
+          mode: typecheck
+          working_directory: ${{ steps.plan.outputs.working_directory }}
+          package_manager: ${{ steps.plan.outputs.manager }}
